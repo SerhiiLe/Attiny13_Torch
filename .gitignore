@@ -1,0 +1,4 @@
+build
+*.lst
+*.elf
+#*.sim1
