@@ -11,9 +11,9 @@
 
 unsigned int t=0;
 
-#define MOSFET_CH 0 // Тип мосфета: 0 - N-Channel, 1 - P-Channel
-#define USE_BACK_LED 0 // Исспользовать "затылочный" светодиод: 0 - нет, 1 - да
-#define USE_STARTUP_BLINK 0 // Моргать светодиодом при включении: 0 - нет, 1 - да
+#define MOSFET_CH 1 // Тип мосфета: 0 - N-Channel, 1 - P-Channel
+#define USE_BACK_LED 1 // Исспользовать "затылочный" светодиод: 0 - нет, 1 - да
+#define USE_STARTUP_BLINK 1 // Моргать светодиодом при включении: 0 - нет, 1 - да
 
 #define PORT PORTB
 #define PIN PINB
@@ -24,11 +24,14 @@ unsigned int t=0;
 // #define Najatie_1 (PIN&(1 << KN0))==0   // Если нажата 1
 #define Najatie_1 PIN&(1 << KN0)   // Если нажата 1
 
-#define PUSH_TIME 100
-#define NO_SWITCH_TIME 30000
+#define PUSH_TIME 100 // задержка для обхода дребезга кнопки
+#define NO_SWITCH_TIME 30000 // таймаут, после которого фонарик выключается, а не переключает яркость
+#define TYPE_DIV 1 // тип делителя напряжения: 0 - 10/27, 1 - 22/68
 
 volatile unsigned char w = 0;
 volatile unsigned char Sleep = 1;
+unsigned char countPush = 0;
+volatile unsigned char lowBattary = 0;
 
 volatile unsigned char buttonReleased = 0;
 volatile unsigned char Mode = 2;
@@ -38,7 +41,11 @@ volatile unsigned long lastPushButton = 0;
 volatile unsigned int  ACP_Schetchik = 0;
 volatile unsigned long ACP_Summa = 0;
 
-const unsigned char shiftPWM[] = {31, 128, 182};
+#if TYPE_DIV == 0
+const unsigned char shiftPWM[] = {27, 128, 182};
+#else
+const unsigned char shiftPWM[] = {26, 86, 175};
+#endif
 
 // ФОНАРЬ
 
@@ -53,18 +60,30 @@ ISR(ADC_vect) {
 
     // ACP_Summa = ACP_Summa >> 10; // деление на 1024 :)
     /* нужен делитель 1/3 (10к/27к), чтобы ловить напряжение аккумулятора
-      тогда формула рассчёта ACP = (int) 251.6 * V_in
+      тогда формула рассчёта ACP = (int) 251.6 * V_in ( 10/(10+27)*1024/1.1 * V_in )
       при 4.2В ADC = 251.6 * 4.2 = 1056
       при 3.1В ADC = 251.6 * 3.1 = 780
       при 2.8В ADC = 251.6 * 2.8 = 704
+
+      если делитель 22к/68к то ACP = (int) 227.5 * V_in:
+      при 4.2В ADC = 227.5 * 4.2 = 956
+      при 3.1В ADC = 227.5 * 3.1 = 705
+      при 2.8В ADC = 227.5 * 2.8 = 637
     */
 
+    #if TYPE_DIV == 0
     uint8_t t = (( ACP_Summa * 241 ) >> 20 ) - shiftPWM[w];
-    OCR0A = t;
 
-    if( ACP_Summa < 798720 ) { OCR0A = 245; } // 780*1024  если напряжение меньше 3.1V то уменьшаем яркость до минимума
-    if( ACP_Summa < 720896 ) { Sleep = 1; }   // 704*1024  если напряжение меньше 2,8V то уходим в спячку
+    if( ACP_Summa < 798720 ) { OCR0A = 245; lowBattary = 1; }  // 780*1024  если напряжение меньше 3.1V то уменьшаем яркость до минимума
+    if( ACP_Summa < 720896 ) { Sleep = 1; }                    // 704*1024  если напряжение меньше 2,8V то уходим в спячку
+    #else
+    uint8_t t = ( ACP_Summa >> 12 ) - shiftPWM[w];
 
+    if( ACP_Summa < 721920 ) { OCR0A = 245; lowBattary = 1; }  // 705*1024  если напряжение меньше 3.1V то уменьшаем яркость до минимума
+    if( ACP_Summa < 652288 ) { Sleep = 1; }                    // 637*1024  если напряжение меньше 2,8V то уходим в спячку
+    #endif
+    
+    if( lowBattary == 0 ) OCR0A = t; // если напряжение упало до минимума, то не корректировать яркость, иначе светодиод начнёт моргать
     ACP_Schetchik = 0;
     ACP_Summa = 0; 
   } else { 
@@ -216,6 +235,8 @@ int main(void) {
       TimeTick = 0; //сброс таймеров после нажатия кнопки
       buttonReleased = 0;
       lastPushButton = 0;
+
+      if( ++countPush > 6 ) Sleep = 1;
     }
 
     if( TimeTick >= NO_SWITCH_TIME ) {  // программа подсчета времени после включения,  
@@ -227,10 +248,11 @@ int main(void) {
     if( Sleep == 1 ) {  
       Sleep = 0;        // сброс, чтобы после просыпания сразу не заснуть
       Mode = 2;         // устанавливаем 2 режим после которого мощность не переключается после включения
+      countPush = 0;    // сброс счётчика нажатий кнопки
+      lowBattary = 0;   // сброс флага низкого напряжения аккумулятора
       OCR0A = 255;      // ШИМ ставим на ноль
       ADCSRA = 0x00;    // выключаем АЦП
       pinOFF(LED1);     // выключаем затылочный светодиод
-      // pinON(LED0);
       _delay_ms(100);
       sleep_enable();   // разрешение режима сна
       sleep_cpu();      // активация режима сна
